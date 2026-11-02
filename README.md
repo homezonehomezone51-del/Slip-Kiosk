@@ -8,3 +8,4 @@ Pages setting (ek dafa): Settings > Pages > Source = **GitHub Actions**.
 
 Code badalna: .py file edit karein > Commit. Actions tab mein "Publish code to Pages" green hone ka intezar karein
 (1-2 min). Exe agli dafa start hone par naya code le leta hai.
+test.

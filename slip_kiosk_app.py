@@ -57,7 +57,7 @@ except Exception:
 DEFAULT_MACHINES = [{'on': True, 'name': f'Machine {i}', 'ip': f'192.168.1.{100 + i}', 'port': '4370', 'key': '0', 'pip': '', 'screen': 0} for i in range(1, 6)]
 cfg = {'device_ip': '192.168.1.201', 'device_port': '4370', 'comm_key': '0', 'printer_ip': '192.168.1.250',
        'paper': '57', 'days': '30', 'mode': 'network', 'printer_name': '', 'source_dir': '', 'dl_on': True, 'dl_min': '5', 'dc_site': 'https://bpo.mydecibel.com/', 'dc_user': 'ST.404473', 'dc_pass': 'Ahmed!@4190', 'plain': False, 'autorun': False, 'preview_only': False, 'show_keypad': False,
-       'machines': DEFAULT_MACHINES, 'lcd_web': False, 'lcd_port': '8080', 'lcd_clear': '20', 'lcd_key': ''}
+       'machines': DEFAULT_MACHINES, 'lcd_web': False, 'lcd_port': '8080', 'lcd_clear': '20', 'preview_clear': '30', 'lcd_key': ''}
 if os.path.exists(CFG):
     cfg.update(json.load(open(CFG)))
 cfg['source_dir'] = cfg.get('source_dir') or SOURCE   # default: the 'source' folder next to the exe (can be changed in the Data tab)
@@ -369,7 +369,7 @@ def field(parent, r, text, var, width=20):
 
 st = tk.Frame(tab_conn, bg=BG); st.pack(fill='x', padx=10)
 mf, pf = box(st, 'Slip', 0), box(st, 'Printer connection (tick the one to use)', 1)
-for i, (t, k) in enumerate([('Paper width (57/80 mm)', 'paper'), ('Days shown on slip', 'days')]):
+for i, (t, k) in enumerate([('Paper (57 / 80 mm roll or A4)', 'paper'), ('Days shown on slip', 'days')]):
     field(mf, i, t, v[k])
 mf.columnconfigure(1, weight=1)
 pf.columnconfigure(1, weight=1)
@@ -422,28 +422,30 @@ def apply():
     except OSError: pass
     for k in ('device_port', 'comm_key', 'days', 'lcd_port', 'lcd_clear'):
         if not cfg[k].isdigit(): raise ValueError(f'{k.replace("_", " ")} must be a number')
-    if cfg['paper'] not in ('57', '58', '80'): raise ValueError('paper width must be 57 or 80')
+    cfg['paper'] = cfg['paper'].upper()
+    if cfg['paper'] not in ('57', '58', '80', 'A4'): raise ValueError('paper must be 57, 80 or A4')
     if cfg['mode'] == 'usb' and not cfg['printer_name']: raise ValueError('Select a USB / Windows printer')
     ms, names = [], set()                                  # the attendance machines table (Machines tab)
     for r in mrows:
-        m = {k2: r[k2].get().strip() for k2 in ('name', 'ip', 'port', 'key', 'pip')}
+        m = {k2: r[k2].get().strip() for k2 in ('name', 'ip', 'port', 'key', 'pip', 'pname')}
         m['on'], m['screen'] = r['on'].get(), screen_num(r['screen'].get())
         m['name'] = m['name'] or f'Machine {len(ms) + 1}'
         m['port'], m['key'] = m['port'] or '4370', m['key'] or '0'
         if m['name'] in names: raise ValueError(f'machine name "{m["name"]}" is used twice')
         names.add(m['name'])
         if m['on'] and not m['ip']: raise ValueError(f'{m["name"]}: machine IP is missing')
+        if m['pip'] and m['pname']: raise ValueError(f'{m["name"]}: give either a printer IP or a Windows printer, not both')
         if not (m['port'].isdigit() and m['key'].isdigit()): raise ValueError(f'{m["name"]}: port and comm key must be numbers')
         ms.append(m)
     cfg['machines'] = ms
     sb.MACHINES = machines_from_cfg()
-    sb.WEB.update(on=cfg['lcd_web'], key=cfg['lcd_key'], clear=int(cfg['lcd_clear']))
+    sb.WEB.update(on=cfg['lcd_web'], key=cfg['lcd_key'], clear=clear_secs())
     sb.PRINTER_IP, sb.PRINTER_NAME = cfg['printer_ip'], (cfg['printer_name'] if cfg['mode'] == 'usb' else '')
     sb.SOURCE_DIR = cfg['source_dir']
     if cfg['dc_site']: sb.PORTAL['site'] = cfg['dc_site']
     sb.DL.update(on=cfg['dl_on'], minutes=int(cfg['dl_min']), user=cfg['dc_user'], pw=cfg['dc_pass'])
-    sb.PRINT_MODE = 'text' if cfg['plain'] else 'raw'
-    sb.COLS, sb.DAYS = (32 if cfg['paper'] in ('57', '58') else 40), int(cfg['days'])      # the engine widens this to the whole report period by itself
+    sb.PRINT_MODE = 'text' if (cfg['plain'] or cfg['paper'] == 'A4') else 'raw'       # A4 = office printer: always normal text
+    sb.COLS, sb.DAYS = (32 if cfg['paper'] in ('57', '58') else 48 if cfg['paper'] == 'A4' else 40), int(cfg['days'])      # the engine widens this to the whole report period by itself
     json.dump(cfg, open(CFG, 'w'))
     sync_lcds(); refresh_links()
     try:
@@ -470,7 +472,7 @@ def start():                               # one listener thread per enabled att
     sb.STOP.clear(); ths.clear()
     for m in sb.MACHINES:
         t = threading.Thread(target=sb.live, args=(m,), daemon=True); t.start(); ths.append(t)
-    if cfg['lcd_web']: sb.start_web(int(cfg['lcd_port']), cfg['lcd_key'], int(cfg['lcd_clear']))
+    if cfg['lcd_web']: sb.start_web(int(cfg['lcd_port']), cfg['lcd_key'], clear_secs())
     refresh_links()
 
 
@@ -631,13 +633,29 @@ def toggle_preview_only():                            # password protected: a wr
     want = preview_only.get()
     if not confirm_exit_password('Password required', 'Enter password to change this setting', 'OK'):
         preview_only.set(not want); return
-    cfg['preview_only'] = want; sb.PREVIEW_ONLY = want
+    cfg['preview_only'] = want; sb.PREVIEW_ONLY = want; sb.WEB['clear'] = clear_secs()
     try: json.dump(cfg, open(CFG, 'w'))
     except OSError: pass
 
 
 ttk.Checkbutton(dbar, text='Preview only: a punch on the machine shows both slips but prints nothing until Print slip is pressed', variable=preview_only,
                 command=toggle_preview_only, style='Card.TCheckbutton').pack(side='right')
+pc_v = tk.StringVar(value=str(cfg.get('preview_clear', '30')))
+
+
+def commit_pc(e=None):                                # adjustable clear time of the previewed slip (no password needed)
+    s = pc_v.get().strip()
+    if s.isdigit(): cfg['preview_clear'] = s; sb.WEB['clear'] = clear_secs()
+    else: pc_v.set(str(cfg.get('preview_clear', '30')))
+    try: json.dump(cfg, open(CFG, 'w'))
+    except OSError: pass
+
+
+pc_f = tk.Frame(dbar, bg=BG); pc_f.pack(side='right', padx=(0, 18))
+tk.Label(pc_f, text='Clear previewed slip after', bg=BG, fg=MUTED, font=FN).pack(side='left', padx=(0, 6))
+pc_e = ttk.Entry(pc_f, textvariable=pc_v, width=5, justify='center'); pc_e.pack(side='left')
+tk.Label(pc_f, text='sec (0 = never)', bg=BG, fg=MUTED, font=FN).pack(side='left', padx=(6, 0))
+pc_e.bind('<Return>', commit_pc); pc_e.bind('<FocusOut>', commit_pc)
 left_o, left = make_card(tab_dash, px=12, py=12)
 left.config(width=290); left.pack_propagate(False)                     # small keypad panel on the left of the Dashboard
 mid_o, mid = make_card(tab_dash, px=14, py=14)
@@ -823,7 +841,11 @@ class SlipPanel:
         self.zoom = 0; self.status.set(''); self.show('\n\n\n\n' + self.idle, True)
 
 
+shown_at, cur_mach = [0], ['']                         # when the last machine punch was shown (for the auto-clear) and which machine it came from (its own printer prints it)
+
+
 def clear():
+    shown_at[0] = 0; cur_mach[0] = ''
     entered.set(''); fresh[0] = False; cur_slip[0] = cur_sal[0] = None
     printed.update(att=False, sal=False); att.clear(); sal.clear()
 
@@ -858,6 +880,7 @@ def show_sal(uid):                                    # salary slip of the ID (f
 def enter():
     uid = entered.get().strip()
     if not uid: return
+    cur_mach[0] = ''; shown_at[0] = 0                  # typed on the keypad: default printer, no auto-clear
     fresh[0] = True; att.status.set(''); sal.status.set(''); printed.update(att=False, sal=False)
     if not safe_apply(): return
     show_att(uid); show_sal(uid)
@@ -871,23 +894,23 @@ def done_print(which):                                # a slip was printed: when
 
 
 def print_now():                                      # attendance + leave balance slip
-    t = cur_slip[0]
+    t, mach = cur_slip[0], cur_mach[0]
     if not t: messagebox.showinfo('Print', 'Enter an ID and press Enter to see the slip first'); return
     att.btn.config(state='disabled'); att.status.set('Printing...'); att.status_lbl.config(fg='#555')
 
     def work():
-        try: sb.print_slip(t); dash_q.put(('ok', t))
+        try: sb.print_slip(t, *printer_of(mach)); dash_q.put(('ok', t))
         except Exception as e: dash_q.put(('err', str(e)))
     threading.Thread(target=work, daemon=True).start()
 
 
 def print_salary():                                   # salary slip
-    t = cur_sal[0]
+    t, mach = cur_sal[0], cur_mach[0]
     if not t: messagebox.showinfo('Print', 'There is no salary slip on screen'); return
     sal.btn.config(state='disabled'); sal.status.set('Printing...'); sal.status_lbl.config(fg='#555')
 
     def work():
-        try: sb.print_slip(t); dash_q.put(('sok', t))
+        try: sb.print_slip(t, *printer_of(mach)); dash_q.put(('sok', t))
         except Exception as e: dash_q.put(('serr', str(e)))
     threading.Thread(target=work, daemon=True).start()
 
@@ -1002,11 +1025,21 @@ for t, c in [('Load WH report', lambda: load_report('WH')), ('Load LB report', l
 
 
 # ---- Machines tab: every attendance machine with its own LCD screen (extra monitor on this PC) and/or its own web LCD page
+def clear_secs():                                      # seconds a slip stays on the screens before it is cleared (0 = never): previewed slips use the Dashboard box, otherwise the web LCD value
+    try: return max(0, int(cfg.get('preview_clear' if sb.PREVIEW_ONLY else 'lcd_clear') or 0))
+    except (TypeError, ValueError): return 0
+
+
+def printer_of(mach):                                  # (network printer IP, Windows printer name) allotted to a machine: its slips print ONLY there
+    m = next((m for m in cfg.get('machines', []) if m.get('name') == mach), None) or {}
+    return (m.get('pip') or None), (m.get('pname') or None)
+
+
 def machines_from_cfg():
     out = []
     for m in cfg.get('machines', []):
         if m.get('on'):
-            try: out.append({'name': m['name'], 'ip': m['ip'], 'port': int(m.get('port') or 4370), 'key': int(m.get('key') or 0), 'printer_ip': m.get('pip', '')})
+            try: out.append({'name': m['name'], 'ip': m['ip'], 'port': int(m.get('port') or 4370), 'key': int(m.get('key') or 0), 'printer_ip': m.get('pip', ''), 'printer_name': m.get('pname', '')})
             except (ValueError, KeyError): pass
     return out
 
@@ -1050,7 +1083,7 @@ def screen_num(s):
 mach_o, mach_b = make_card(tab_mach, 'Attendance machines and their LCD screens')
 mach_o.pack(fill='x', padx=16, pady=(12, 8))
 mrows = []
-for c, (t, _) in enumerate([('Use', 0), ('Name', 0), ('Machine IP', 0), ('Port', 0), ('Comm Key', 0), ('Own printer IP (optional)', 0), ('LCD screen on this PC', 0)]):
+for c, (t, _) in enumerate([('Use', 0), ('Name', 0), ('Machine IP', 0), ('Port', 0), ('Comm Key', 0), ('Own printer IP (optional)', 0), ('Own Windows / USB printer (optional)', 0), ('LCD screen on this PC', 0)]):
     tk.Label(mach_b, text=t, bg='white', fg=MUTED, font=FN).grid(row=0, column=c, sticky='w', padx=(0, 8), pady=(0, 4))
 
 
@@ -1058,9 +1091,10 @@ def add_mrow(m=None):
     r = len(mrows) + 1
     m = m or {'on': True, 'name': f'Machine {r}', 'ip': f'192.168.1.{100 + r}', 'port': '4370', 'key': '0', 'pip': '', 'screen': 0}
     row = {'on': tk.BooleanVar(value=bool(m.get('on', True))), 'screen': tk.StringVar(value=screen_text(m.get('screen')))}
-    for k2 in ('name', 'ip', 'port', 'key', 'pip'): row[k2] = tk.StringVar(value=str(m.get(k2, '')))
+    for k2 in ('name', 'ip', 'port', 'key', 'pip', 'pname'): row[k2] = tk.StringVar(value=str(m.get(k2, '')))
     row['w'] = [ttk.Checkbutton(mach_b, variable=row['on'], style='Card.TCheckbutton')]
     for c, (k2, wd) in enumerate((('name', 14), ('ip', 16), ('port', 6), ('key', 6), ('pip', 16)), 1): row['w'].append(ttk.Entry(mach_b, textvariable=row[k2], width=wd))
+    row['w'].append(ttk.Combobox(mach_b, textvariable=row['pname'], values=[''] + list(cb['values']), width=26, state='readonly'))
     row['w'].append(ttk.Combobox(mach_b, textvariable=row['screen'], values=SCREENS, width=22, state='readonly'))
     for c, w in enumerate(row['w']): w.grid(row=r, column=c, sticky='w', padx=(0, 8), pady=3)
     mrows.append(row)
@@ -1076,8 +1110,8 @@ mbt = tk.Frame(mach_o, bg='white'); mbt.pack(fill='x', padx=16, pady=(0, 12))
 ttk.Button(mbt, text='Save + Start', style='Primary.TButton', command=start).pack(side='left')
 ttk.Button(mbt, text='Save', command=lambda: safe_apply()).pack(side='left', padx=8)
 ttk.Button(mbt, text='Add machine', command=add_mrow).pack(side='left'); ttk.Button(mbt, text='Remove last', command=remove_mrow).pack(side='left', padx=8)
-tk.Label(mach_b, text='LCD screen: a window that covers that whole monitor and shows ONLY this machine\'s punches (Monitor 1 = the leftmost screen). Own printer: leave empty to use the printer from the Connectivity tab.',
-         bg='white', fg=MUTED, font=FN, justify='left', wraplength=900).grid(row=99, column=0, columnspan=7, sticky='w', pady=(8, 0))
+tk.Label(mach_b, text='LCD screen: a window that covers that whole monitor and shows ONLY this machine\'s punches (Monitor 1 = the leftmost screen). Own printer (IP or Windows / USB printer): the slips of this machine print ONLY on it; leave both empty to use the printer from the Connectivity tab.',
+         bg='white', fg=MUTED, font=FN, justify='left', wraplength=900).grid(row=99, column=0, columnspan=8, sticky='w', pady=(8, 0))
 
 web_o, web_b = make_card(tab_mach, 'LCD over the network (any PC, TV or tablet with a browser, no cable to this PC needed)')
 web_o.pack(fill='x', padx=16, pady=(0, 8))
@@ -1130,8 +1164,8 @@ class LcdWindow:
 
     def tick(self):
         try:
-            s = int(cfg.get('lcd_clear') or 0)
-            if self.stamp and s and not sb.PREVIEW_ONLY and time.time() - self.stamp > s: self.clear()
+            s = clear_secs()
+            if self.stamp and s and time.time() - self.stamp > s: self.clear()
         finally:
             self.win.after(1000, self.tick)
 
@@ -1139,10 +1173,10 @@ class LcdWindow:
         t, p = self.cur[which], self.att if which == 'att' else self.sal
         if not t: return
         p.btn.config(state='disabled'); p.status.set('Printing...'); p.status_lbl.config(fg='#555')
-        pip = next((m.get('pip') for m in cfg.get('machines', []) if m['name'] == self.name), '') or None
+        pip, pname = printer_of(self.name)
 
         def work():
-            try: sb.print_slip(t, pip); ok, err = True, ''
+            try: sb.print_slip(t, pip, pname); ok, err = True, ''
             except Exception as e: ok, err = False, str(e)
             root.after(0, lambda: self.printed(p, ok, err))
         threading.Thread(target=work, daemon=True).start()
@@ -1188,6 +1222,7 @@ def sync_lcds():                                       # open / close / move the
 
 
 def poll():
+    if sb.PREVIEW_ONLY and shown_at[0] and clear_secs() and time.time() - shown_at[0] > clear_secs(): clear()      # previewed slip: cleared after the time set on the Dashboard
     while not dash_q.empty():
         kind, info = dash_q.get()
         if kind in ('ok', 'err', 'punch'): att.btn.config(state='normal')
@@ -1198,6 +1233,7 @@ def poll():
             sb.STATS['printer'] = 'OK (salary slip)'; done_print('sal')
         elif kind == 'punch':                                   # employee punched on the machine: punch state 4 = salary slip, every other state = attendance + leave balance slip (it prints by itself)
             uid, text, state, err, mach = info
+            cur_mach[0], shown_at[0] = mach, time.time()
             if mach in lcds: lcds[mach].handle(uid, text, state, err)      # this machine's own LCD screen
             entered.set(uid); fresh[0] = True
             if state in ('show', 'notfound'):                   # attendance punch: only the attendance slip is shown / printed

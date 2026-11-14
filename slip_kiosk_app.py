@@ -339,7 +339,7 @@ def card(parent, title, keys, col, wrap=200):
 cards_c = tk.Frame(tab_conn, bg=BG); cards_c.pack(fill='x', padx=10, pady=(12, 8))
 card(cards_c, 'Machine', ['mach', 'mach_state'], 0); card(cards_c, 'Printer', ['prn'], 1); card(cards_c, 'Activity', ['slips', 'last'], 2)
 cards_d = tk.Frame(tab_data, bg=BG); cards_d.pack(fill='x', padx=10, pady=(12, 8))
-card(cards_d, 'Reports', ['wh', 'lb', 'emp', 'sal', 'watch', 'sync'], 0, wrap=900)
+card(cards_d, 'Reports', ['wh', 'lb', 'emp', 'sal', 'sync'], 0, wrap=900)
 
 
 # ---- settings
@@ -394,7 +394,7 @@ ttk.Checkbutton(pf, text='Start automatically with Windows', variable=auto, styl
 # ---- Data tab: linked folder
 af_o, af = make_card(tab_data, 'Reports auto-update')
 af_o.pack(fill='x', padx=16, pady=(0, 8))
-tk.Label(af, text=f'The app logs in to Decibel and downloads the WH and LB reports into the source folder as "{sb.REPORT_NAMES["WH"]}" / "{sb.REPORT_NAMES["LB"]}" (old file replaced). Reports you copy there yourself are loaded too (name must contain WH or LB; .xls, .xlsx or .csv).', bg='white', fg=MUTED, font=FN, justify='left', wraplength=1000).pack(anchor='w', pady=(0, 6))
+tk.Label(af, text=f'The app downloads the WH / LB reports from Decibel into the source folder as "{sb.REPORT_NAMES["WH"]}" / "{sb.REPORT_NAMES["LB"]}". Files you copy there yourself (name has WH or LB) are loaded too.', bg='white', fg=MUTED, font=FN, justify='left', wraplength=1100).pack(anchor='w', pady=(0, 4))
 for _lbl, _k in (('Work Hour report link', 'WH'), ('Leave Balance report link', 'LB')):
     _r = tk.Frame(af, bg='white'); _r.pack(fill='x', pady=1)
     tk.Label(_r, text=_lbl, bg='white', fg=MUTED, font=FN, width=24, anchor='w').pack(side='left')
@@ -411,6 +411,22 @@ def check_now():
 
 
 ttk.Button(row_f, text='Check now', style='Primary.TButton', command=check_now).pack(side='left', padx=(8, 0))
+pc_v = tk.StringVar(value=str(cfg.get('preview_clear', '30')))
+
+
+def commit_pc(e=None):                                # adjustable clear time of the previewed slip (no password needed)
+    s = pc_v.get().strip()
+    if s.isdigit(): cfg['preview_clear'] = s; sb.WEB['clear'] = clear_secs()
+    else: pc_v.set(str(cfg.get('preview_clear', '30')))
+    try: json.dump(cfg, open(CFG, 'w'))
+    except OSError: pass
+
+
+pc_row = tk.Frame(af, bg='white'); pc_row.pack(fill='x', pady=(8, 0)); pc_f = tk.Frame(pc_row, bg='white'); pc_f.pack(side='left')
+tk.Label(pc_f, text='Clear previewed slip + keypad after', bg='white', fg=MUTED, font=FN).pack(side='left', padx=(0, 6))
+pc_e = ttk.Entry(pc_f, textvariable=pc_v, width=5, justify='center'); pc_e.pack(side='left')
+tk.Label(pc_f, text='seconds (0 = never clear)', bg='white', fg=MUTED, font=FN).pack(side='left', padx=(6, 0))
+pc_e.bind('<Return>', commit_pc); pc_e.bind('<FocusOut>', commit_pc)
 
 
 def apply():
@@ -829,6 +845,8 @@ class SlipPanel:
         self.zoom = 0; self.status.set(''); self.show('\n\n\n\n' + self.idle, True)
 
 
+def _stamp(*_): shown_at[0] = time.time() if entered.get() else 0       # the clear timer restarts with every key / punch and stops when the ID is empty
+entered.trace_add('write', _stamp)
 shown_at, cur_mach = [0], ['']                         # when the last machine punch was shown (for the auto-clear) and which machine it came from (its own printer prints it)
 
 
@@ -1021,25 +1039,10 @@ dl_msg = tk.Label(dl_row, text='', bg='white', fg=MUTED, font=FN, anchor='w', ju
 bd_o, bar_d = make_card(tab_data, 'Manual upload')
 bd_o.pack(fill='x', padx=16, pady=(0, 8))
 tk.Label(bar_d, text='Normally not needed: just copy the WH / LB files into the reports folder. Or pick a file here (.xls, .xlsx or .csv, name must contain WH or LB; salary slips: any PDF).', bg='white', fg=MUTED, font=FN).pack(anchor='w', pady=(0, 10))
-btn_row = tk.Frame(bar_d, bg='white'); btn_row.pack(fill='x')
+btn_row = tk.Frame(bar_d, bg='white'); btn_row.pack(anchor='w')
 for t, c in [('Load WH report', lambda: load_report('WH')), ('Load LB report', lambda: load_report('LB')), ('Load salary PDF', lambda: load_salary_pdf())]:
     load_btns.append(ttk.Button(btn_row, text=t, style='Primary.TButton', command=c)); load_btns[-1].pack(side='left', padx=(0, 8))
-pc_v = tk.StringVar(value=str(cfg.get('preview_clear', '30')))
 
-
-def commit_pc(e=None):                                # adjustable clear time of the previewed slip (no password needed)
-    s = pc_v.get().strip()
-    if s.isdigit(): cfg['preview_clear'] = s; sb.WEB['clear'] = clear_secs()
-    else: pc_v.set(str(cfg.get('preview_clear', '30')))
-    try: json.dump(cfg, open(CFG, 'w'))
-    except OSError: pass
-
-
-pc_f = tk.Frame(btn_row, bg='white'); pc_f.pack(side='right')
-tk.Label(pc_f, text='Clear previewed slip after', bg='white', fg=MUTED, font=FN).pack(side='left', padx=(0, 6))
-pc_e = ttk.Entry(pc_f, textvariable=pc_v, width=5, justify='center'); pc_e.pack(side='left')
-tk.Label(pc_f, text='sec (0 = never)', bg='white', fg=MUTED, font=FN).pack(side='left', padx=(6, 0))
-pc_e.bind('<Return>', commit_pc); pc_e.bind('<FocusOut>', commit_pc)
 
 
 # ---- Machines tab: every attendance machine with its own LCD screen (extra monitor on this PC) and/or its own web LCD page

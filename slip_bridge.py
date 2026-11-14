@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 
 DEVICE_IP, DEVICE_PORT, COMM_KEY = '192.168.1.201', 4370, 0
 PRINTER_IP, PRINTER_PORT = '192.168.1.250', 9100   # network thermal printer (raw ESC/POS)
-COLS, DAYS = 32, 30                                 # 57 mm paper: 32 | 80 mm paper: 40
+COLS, DAYS = 32, 30                                 # 57 mm paper: 32 | 80 mm paper: 40 | A4: 48
 DUPLICATE_SECONDS = 600                             # same person ignored for 10 minutes
 SOURCE_DIR = ''                                     # source folder the downloaded reports are copied from (checked every 5 s); the window app sets it to the 'source' folder next to the exe
 REPORT_NAMES = {'WH': 'WH Report', 'LB': 'LB Report'}   # the browser extension saves its downloads under these names (any extension), replacing the old file every 5 min
@@ -33,6 +33,7 @@ PRINTER_NAME = ''                                  # USB / Windows printer name;
 SALARY_PUNCH_STATE = 4                              # punch state (the machine's function key) that prints the SALARY slip
 ATTENDANCE_PUNCH_STATES = None                      # None = every other state (3, 0, 1 ...) prints the attendance + leave balance slip; {3} = only state 3 does (others are ignored)
 PREVIEW_ONLY = False                                # True (set by the window app, password protected): a punch only shows the attendance + salary slip, nothing prints
+PAGE_FONT_PT, PAGE_MARGIN_IN = 12, 0.5                  # text printing on a wide page (A4 / Letter on a Windows printer): font size and margin; narrow rolls use 9 pt and no margin
 PRINT_RED = True                                    # Absent / Fullday Ded. lines in red: two-colour ESC/POS paper, or colour on a Windows driver (a one-colour printer just prints black). False = never send the colour command
 MACHINES = []                                       # set by the window app: [{'name', 'ip', 'port', 'key', 'printer_ip'}] one entry per attendance machine; each runs live() in its own thread
 ID_MAP = {}                                         # only if device IDs differ: {'1': '401708'}
@@ -1461,25 +1462,32 @@ def printer_problem(h):
 
 
 def gdi_print(text, pname=None):
-    """Print as normal text through the Windows printer driver (works on any installed printer)."""
+    """Print as normal text through the Windows printer driver (works on any installed printer). Thermal rolls: 9 pt from the left edge;
+    a wide page (A4 / Letter): bigger font, margins, and the slip is kept as one block on the page (a long slip continues on the next page)."""
     import win32con, win32ui
     dc = win32ui.CreateDC()
     dc.CreatePrinterDC(pname or PRINTER_NAME)
     try:
         width, height, dpi = dc.GetDeviceCaps(win32con.HORZRES), dc.GetDeviceCaps(win32con.VERTRES), dc.GetDeviceCaps(win32con.LOGPIXELSY)
-        em = int(min(width / (COLS * 0.6), dpi * 9 / 72))        # 9 pt, or smaller so COLS characters fit the paper width
-        fonts = {k: win32ui.CreateFont({'name': 'Courier New', 'height': -h, 'weight': w}) for k, h, w in (('n', em, 400), ('b', em, 700), ('big', em * 2, 700))}
-        step, y = int(em * 1.12), 0
+        dpx = dc.GetDeviceCaps(win32con.LOGPIXELSX) or dpi
+        wide = width / dpx > 5                                    # wider than 5 inch printable = A4 / Letter, not a thermal roll
+        mx, my = (int(dpx * PAGE_MARGIN_IN), int(dpi * PAGE_MARGIN_IN)) if wide else (0, 0)
+        cols = max(COLS, max((len(ln.rstrip()) for ln in text.split('\n')), default=0))   # widest line, so nothing is cut off
+        pt = PAGE_FONT_PT if wide else 9
+        em = int(min((width - 2 * mx) / (cols * 0.6), dpi * pt / 72))                     # chosen size, or smaller so every character fits the width
+        fonts = {k: win32ui.CreateFont({'name': 'Courier New', 'height': -h, 'weight': w}) for k, h, w in (('n', em, 400), ('b', em, 700), ('big', em * 2 if not wide else int(em * 1.5), 700))}
+        step, y = int(em * 1.15), my
+        limit = height - my
         dc.StartDoc('Attendance slip')
         dc.StartPage()
         for line in text.split('\n'):
             k = 'big' if is_big(line) else 'b' if is_bold(line) else 'n'
-            h = step * 2 if k == 'big' else step
-            if y + h > height:
-                dc.EndPage(); dc.StartPage(); y = 0
+            h = (step * 2 if not wide else int(step * 1.5)) if k == 'big' else step
+            if y + h > limit:
+                dc.EndPage(); dc.StartPage(); y = my
             dc.SelectObject(fonts[k])
             dc.SetTextColor(0x0000FF if PRINT_RED and is_red(line) else 0)      # COLORREF is BGR: 0x0000FF = red
-            dc.TextOut(0, y, line.rstrip()); y += h
+            dc.TextOut(mx, y, line.rstrip()); y += h
         dc.EndPage()
         dc.EndDoc()
     finally:
@@ -1646,11 +1654,12 @@ def start_web(port, key, clear=20):
 
 
 def live(dev=None):
-    """Listen to ONE attendance machine (dev = {'name', 'ip', 'port', 'key', 'printer_ip'}); the window app starts one live() thread per machine."""
+    """Listen to ONE attendance machine (dev = {'name', 'ip', 'port', 'key', 'printer_ip', 'printer_name'}); the window app starts one live() thread per machine."""
     from zk import ZK
     dev = dev or {}
     ip, port, key = dev.get('ip', DEVICE_IP), int(dev.get('port', DEVICE_PORT)), int(dev.get('key', COMM_KEY))
     name, pip = dev.get('name', 'Machine'), dev.get('printer_ip') or None          # pip: this machine's own network printer (None = the default printer)
+    pname = dev.get('printer_name') or None                                        # or this machine's own Windows / USB printer; the slip prints ONLY there (no fallback to another printer)
     hook = lambda uid, text, state, err: _hook(uid, text, state, err, name)
     tag = f'[{name}] ' if dev else ''
 
@@ -1693,7 +1702,7 @@ def live(dev=None):
                     hook(uid, text, 'sshow' if text else 'snotfound', '')
                     if text:
                         try:
-                            print_slip(text, pip)
+                            print_slip(text, pip, pname)
                             hook(uid, text, 'sok', '')
                             STATS.update(slips=STATS['slips'] + 1, printer='OK', last=f'{att.timestamp:%H:%M:%S}  {name}  ID {uid}  salary slip')
                             print(f'{tag}  salary slip sent to printer in {time.time() - t0:.2f} s')
@@ -1710,7 +1719,7 @@ def live(dev=None):
                 hook(uid, text, 'show' if text else 'notfound', '')
                 if text:
                     try:
-                        print_slip(text, pip)
+                        print_slip(text, pip, pname)
                         hook(uid, text, 'ok', '')
                         STATS.update(slips=STATS['slips'] + 1, printer='OK',
                                      last=f'{att.timestamp:%H:%M:%S}  {name}  ID {uid}  {DATA[uid]["n"]}')

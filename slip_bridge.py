@@ -1494,6 +1494,73 @@ def gdi_print(text, pname=None):
         dc.DeleteDC()
 
 
+def pair_mode(printer_ip=None, printer_name=None):
+    """True when a slip goes to a Windows / USB printer in normal-text mode (office printer, A4): attendance + salary slip then share ONE page."""
+    return PRINT_MODE == 'text' and bool(printer_name or (not printer_ip and PRINTER_NAME))
+
+
+def gdi_print_pair(att, sal, pname=None):
+    """ONE page: attendance slip on the left, salary slip on the right (either may be None: the other one is printed alone, on the left).
+    The font is as big as fits (max PAGE_FONT_PT); a slip that is too long for the page continues on the next page, both columns together."""
+    import win32con, win32ui
+    texts = [t for t in (att, sal) if t]
+    if not texts:
+        return
+    dc = win32ui.CreateDC()
+    dc.CreatePrinterDC(pname or PRINTER_NAME)
+    try:
+        width, height, dpi = dc.GetDeviceCaps(win32con.HORZRES), dc.GetDeviceCaps(win32con.VERTRES), dc.GetDeviceCaps(win32con.LOGPIXELSY)
+        dpx = dc.GetDeviceCaps(win32con.LOGPIXELSX) or dpi
+        mx, my = (int(dpx * PAGE_MARGIN_IN), int(dpi * PAGE_MARGIN_IN)) if width / dpx > 5 else (0, 0)
+        widths = [max(COLS, max(len(ln.rstrip()) for ln in t.split('\n'))) for t in texts]
+        gap = 4 if len(texts) > 1 else 0
+        em = int(min((width - 2 * mx) / ((sum(widths) + gap) * 0.6), dpi * PAGE_FONT_PT / 72))
+        fonts = {k: win32ui.CreateFont({'name': 'Courier New', 'height': -h, 'weight': w}) for k, h, w in (('n', em, 400), ('b', em, 700), ('big', int(em * 1.5), 700))}
+        step, limit = int(em * 1.15), height - my
+        xs = [mx + int((sum(widths[:i]) + gap * i) * 0.6 * em) for i in range(len(texts))]
+        rows = []
+        for i, t in enumerate(texts):
+            col = []
+            for line in t.split('\n'):
+                k = 'big' if is_big(line) else 'b' if is_bold(line) else 'n'
+                if k == 'big' and len(line.rstrip()) * 0.9 * em > widths[i] * 0.6 * em:
+                    k = 'b'                                      # too long for the bigger font inside its column
+                col.append((line.rstrip(), k, int(step * 1.5) if k == 'big' else step))
+            rows.append(col)
+        pos = [0] * len(rows)
+        dc.StartDoc('Attendance + salary slip')
+        while any(pos[i] < len(rows[i]) for i in range(len(rows))):
+            dc.StartPage()
+            for i, col in enumerate(rows):
+                y = my
+                while pos[i] < len(col):
+                    line, k, h = col[pos[i]]
+                    if y + h > limit and y > my:
+                        break
+                    dc.SelectObject(fonts[k])
+                    dc.SetTextColor(0x0000FF if PRINT_RED and is_red(line) else 0)
+                    dc.TextOut(xs[i], y, line); y += h; pos[i] += 1
+            dc.EndPage()
+        dc.EndDoc()
+    finally:
+        dc.DeleteDC()
+
+
+def print_pair(att, sal, printer_ip=None, printer_name=None):
+    """Attendance + salary slip on one page of a Windows printer (see pair_mode)."""
+    import win32print
+    pname = printer_name or PRINTER_NAME
+    h = win32print.OpenPrinter(pname)
+    try:
+        bad, jobs = printer_problem(h)
+        if bad:
+            raise RuntimeError(f'Printer "{pname}" is {bad}. Fix it in Windows (Settings > Printers & scanners)')
+        gdi_print_pair(att, sal, pname)
+        print(f'  Windows print queue: {win32print.GetPrinter(h, 2)["cJobs"]} job(s) waiting')
+    finally:
+        win32print.ClosePrinter(h)
+
+
 def print_slip(text, printer_ip=None, printer_name=None):
     """Print on the default printer, or on this machine's own printer when printer_ip / printer_name is given."""
     pname, pip = (printer_name, PRINTER_IP) if printer_name else ('', printer_ip) if printer_ip else (PRINTER_NAME, PRINTER_IP)
@@ -1702,7 +1769,10 @@ def live(dev=None):
                     hook(uid, text, 'sshow' if text else 'snotfound', '')
                     if text:
                         try:
-                            print_slip(text, pip, pname)
+                            if pair_mode(pip, pname):                            # A4 / office printer: salary + attendance slip on ONE page
+                                refresh(); print_pair(slip(uid, att.timestamp), text, pip, pname)
+                            else:
+                                print_slip(text, pip, pname)
                             hook(uid, text, 'sok', '')
                             STATS.update(slips=STATS['slips'] + 1, printer='OK', last=f'{att.timestamp:%H:%M:%S}  {name}  ID {uid}  salary slip')
                             print(f'{tag}  salary slip sent to printer in {time.time() - t0:.2f} s')
@@ -1719,7 +1789,10 @@ def live(dev=None):
                 hook(uid, text, 'show' if text else 'notfound', '')
                 if text:
                     try:
-                        print_slip(text, pip, pname)
+                        if pair_mode(pip, pname):                                # A4 / office printer: attendance + salary slip on ONE page
+                            print_pair(text, salary_text(uid), pip, pname)
+                        else:
+                            print_slip(text, pip, pname)
                         hook(uid, text, 'ok', '')
                         STATS.update(slips=STATS['slips'] + 1, printer='OK',
                                      last=f'{att.timestamp:%H:%M:%S}  {name}  ID {uid}  {DATA[uid]["n"]}')

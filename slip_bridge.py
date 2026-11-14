@@ -15,7 +15,6 @@ Test  : python slip_bridge.py --test 401708     (prints slip on screen, no hardw
 Live  : python slip_bridge.py                   (listens to the device and prints slips)
 """
 import csv, glob, html, http.cookiejar, io, itertools, json, os, re, shutil, socket, sys, threading, time, urllib.error, urllib.parse, urllib.request
-from html.parser import HTMLParser
 from datetime import datetime, timedelta
 
 DEVICE_IP, DEVICE_PORT, COMM_KEY = '192.168.1.201', 4370, 0
@@ -838,51 +837,46 @@ class LoginFailed(ValueError):
     pass
 
 
-class _FormParser(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.forms, self._f, self._sel, self._opt, self._ta = [], None, None, None, None
+_TAG_RE = re.compile(r'<(/?)(form|input|select|option|textarea)\b((?:"[^"]*"|\'[^\']*\'|[^\'">])*)>', re.I)
+_ATTR_RE = re.compile(r'([\w:.-]+)(?:\s*=\s*("[^"]*"|\'[^\']*\'|[^\s"\'>]+))?')
 
-    def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
-        if tag == 'form':
-            self._f = {'action': a.get('action') or '', 'els': []}; self.forms.append(self._f)
-        elif self._f is None:
-            return
-        elif tag == 'input':
-            t = (a.get('type') or 'text').lower()
-            v = a.get('value')
-            self._f['els'].append({'t': t, 'n': a.get('name'), 'v': ('on' if v is None and t in ('checkbox', 'radio') else v or ''), 'c': 'checked' in a, 'dis': 'disabled' in a})
-        elif tag == 'select':
-            self._sel = {'t': 'select', 'n': a.get('name'), 'opts': [], 'dis': 'disabled' in a}; self._f['els'].append(self._sel)
-        elif tag == 'option' and self._sel is not None:
-            self._opt = [a.get('value'), '', 'selected' in a]; self._sel['opts'].append(self._opt)
-        elif tag == 'textarea':
-            self._ta = {'t': 'textarea', 'n': a.get('name'), 'v': '', 'dis': 'disabled' in a}; self._f['els'].append(self._ta)
 
-    def handle_data(self, d):
-        if self._opt is not None:
-            self._opt[1] += d
-        elif self._ta is not None:
-            self._ta['v'] += d
-
-    def handle_endtag(self, tag):
-        if tag == 'option' and self._opt is not None:
-            if self._opt[0] is None:
-                self._opt[0] = self._opt[1].strip()
-            self._opt = None
-        elif tag == 'select':
-            self._sel = None
-        elif tag == 'textarea':
-            self._ta = None
-        elif tag == 'form':
-            self._f = None
+def _attrs(s):
+    out = {}
+    for m in _ATTR_RE.finditer(s):
+        v = m.group(2)
+        out[m.group(1).lower()] = html.unescape(v[1:-1] if v and v[0] in '"\'' else v) if v is not None else ''
+    return out
 
 
 def _parse_forms(page):
-    p = _FormParser()
-    p.feed(page)
-    return p.forms
+    """Forms of an HTML page as [{'action', 'els': [...]}] (plain regex, so nothing beyond the standard 're' / 'html' modules is needed)."""
+    forms, f, sel, opt = [], None, None, None
+    ms = list(_TAG_RE.finditer(page))
+    for k, m in enumerate(ms):
+        close, tag, a = m.group(1), m.group(2).lower(), _attrs(m.group(3))
+        nxt = ms[k + 1].start() if k + 1 < len(ms) else len(page)
+        if close:
+            if tag == 'select':
+                sel = None
+            elif tag == 'form':
+                f = None
+            continue
+        if tag == 'form':
+            f = {'action': a.get('action', ''), 'els': []}; forms.append(f)
+        elif f is None:
+            continue
+        elif tag == 'input':
+            t, v = (a.get('type') or 'text').lower(), a.get('value')
+            f['els'].append({'t': t, 'n': a.get('name'), 'v': ('on' if v is None and t in ('checkbox', 'radio') else v or ''), 'c': 'checked' in a, 'dis': 'disabled' in a})
+        elif tag == 'select':
+            sel = {'t': 'select', 'n': a.get('name'), 'opts': [], 'dis': 'disabled' in a}; f['els'].append(sel)
+        elif tag == 'option' and sel is not None:
+            text = html.unescape(page[m.end():nxt].split('<', 1)[0])
+            sel['opts'].append([a['value'] if 'value' in a else text.strip(), text, 'selected' in a])
+        elif tag == 'textarea':
+            f['els'].append({'t': 'textarea', 'n': a.get('name'), 'v': html.unescape(page[m.end():nxt].split('<', 1)[0]), 'dis': 'disabled' in a})
+    return forms
 
 
 def _has_login(page):

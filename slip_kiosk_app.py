@@ -377,6 +377,7 @@ ttk.Radiobutton(pf, text='Network printer (IP)', variable=v['mode'], value='netw
 ttk.Entry(pf, textvariable=v['printer_ip'], width=22).grid(row=0, column=1, sticky='ew', padx=(14, 0), pady=5)
 ttk.Radiobutton(pf, text='USB / Windows printer', variable=v['mode'], value='usb', style='Card.TRadiobutton').grid(row=1, column=0, sticky='w', pady=5)
 cb = ttk.Combobox(pf, textvariable=v['printer_name'], values=printers(), width=30, state='readonly'); cb.grid(row=1, column=1, sticky='ew', padx=(14, 0), pady=5)
+cb.bind('<<ComboboxSelected>>', lambda e: (v['mode'].set('usb'), plain.set(True)))      # a Windows printer prints normal text, attendance + salary slip on one A4 page (untick the box below for a thermal printer)
 ttk.Button(pf, text='Refresh', command=lambda: cb.config(values=printers())).grid(row=1, column=2, padx=(8, 0))
 def open_queue():
     n = v['printer_name'].get().strip()
@@ -416,6 +417,9 @@ def apply():
     for k in v: cfg[k] = v[k].get().strip()
     cfg['autorun'], cfg['plain'], cfg['lcd_web'] = auto.get(), plain.get(), lcdweb.get()
     cfg['dl_on'] = dl_on.get()
+    try:
+        if pc_v.get().strip().isdigit(): cfg['preview_clear'] = pc_v.get().strip()
+    except NameError: pass
     if not cfg['dl_min'].isdigit() or int(cfg['dl_min']) < 1: raise ValueError('Download repeat time must be a whole number of minutes (1 or more)')
     if not cfg['source_dir']: cfg['source_dir'] = SOURCE
     try: os.makedirs(cfg['source_dir'], exist_ok=True)
@@ -445,7 +449,7 @@ def apply():
     if cfg['dc_site']: sb.PORTAL['site'] = cfg['dc_site']
     sb.DL.update(on=cfg['dl_on'], minutes=int(cfg['dl_min']), user=cfg['dc_user'], pw=cfg['dc_pass'])
     sb.PRINT_MODE = 'text' if (cfg['plain'] or cfg['paper'] == 'A4') else 'raw'       # A4 = office printer: always normal text
-    sb.COLS, sb.DAYS = (32 if cfg['paper'] in ('57', '58') else 48 if cfg['paper'] == 'A4' else 40), int(cfg['days'])      # the engine widens this to the whole report period by itself
+    sb.COLS, sb.DAYS = (32 if cfg['paper'] in ('57', '58') else 40), int(cfg['days'])      # the engine widens this to the whole report period by itself
     json.dump(cfg, open(CFG, 'w'))
     sync_lcds(); refresh_links()
     try:
@@ -640,22 +644,6 @@ def toggle_preview_only():                            # password protected: a wr
 
 ttk.Checkbutton(dbar, text='Preview only: a punch on the machine shows both slips but prints nothing until Print slip is pressed', variable=preview_only,
                 command=toggle_preview_only, style='Card.TCheckbutton').pack(side='right')
-pc_v = tk.StringVar(value=str(cfg.get('preview_clear', '30')))
-
-
-def commit_pc(e=None):                                # adjustable clear time of the previewed slip (no password needed)
-    s = pc_v.get().strip()
-    if s.isdigit(): cfg['preview_clear'] = s; sb.WEB['clear'] = clear_secs()
-    else: pc_v.set(str(cfg.get('preview_clear', '30')))
-    try: json.dump(cfg, open(CFG, 'w'))
-    except OSError: pass
-
-
-pc_f = tk.Frame(dbar, bg=BG); pc_f.pack(side='right', padx=(0, 18))
-tk.Label(pc_f, text='Clear previewed slip after', bg=BG, fg=MUTED, font=FN).pack(side='left', padx=(0, 6))
-pc_e = ttk.Entry(pc_f, textvariable=pc_v, width=5, justify='center'); pc_e.pack(side='left')
-tk.Label(pc_f, text='sec (0 = never)', bg=BG, fg=MUTED, font=FN).pack(side='left', padx=(6, 0))
-pc_e.bind('<Return>', commit_pc); pc_e.bind('<FocusOut>', commit_pc)
 left_o, left = make_card(tab_dash, px=12, py=12)
 left.config(width=290); left.pack_propagate(False)                     # small keypad panel on the left of the Dashboard
 mid_o, mid = make_card(tab_dash, px=14, py=14)
@@ -880,10 +868,10 @@ def show_sal(uid):                                    # salary slip of the ID (f
 def enter():
     uid = entered.get().strip()
     if not uid: return
-    cur_mach[0] = ''; shown_at[0] = 0                  # typed on the keypad: default printer, no auto-clear
+    cur_mach[0] = ''                                   # typed on the keypad: default printer
     fresh[0] = True; att.status.set(''); sal.status.set(''); printed.update(att=False, sal=False)
     if not safe_apply(): return
-    show_att(uid); show_sal(uid)
+    show_att(uid); show_sal(uid); shown_at[0] = time.time()      # the auto-clear time starts now
 
 
 def done_print(which):                                # a slip was printed: when every slip on screen is printed, the ID and previews are cleared for the next employee
@@ -898,8 +886,15 @@ def print_now():                                      # attendance + leave balan
     if not t: messagebox.showinfo('Print', 'Enter an ID and press Enter to see the slip first'); return
     att.btn.config(state='disabled'); att.status.set('Printing...'); att.status_lbl.config(fg='#555')
 
+    ta, ts_ = cur_slip[0], cur_sal[0]
+
     def work():
-        try: sb.print_slip(t, *printer_of(mach)); dash_q.put(('ok', t))
+        try:
+            pr = printer_of(mach)
+            if sb.pair_mode(*pr):                          # Windows printer / A4: attendance + salary slip on ONE page
+                sb.print_pair(ta, ts_, *pr); dash_q.put(('ok', t))
+                if ts_: dash_q.put(('sok', ts_))
+            else: sb.print_slip(t, *pr); dash_q.put(('ok', t))
         except Exception as e: dash_q.put(('err', str(e)))
     threading.Thread(target=work, daemon=True).start()
 
@@ -909,8 +904,15 @@ def print_salary():                                   # salary slip
     if not t: messagebox.showinfo('Print', 'There is no salary slip on screen'); return
     sal.btn.config(state='disabled'); sal.status.set('Printing...'); sal.status_lbl.config(fg='#555')
 
+    ta = cur_slip[0]
+
     def work():
-        try: sb.print_slip(t, *printer_of(mach)); dash_q.put(('sok', t))
+        try:
+            pr = printer_of(mach)
+            if sb.pair_mode(*pr):                          # Windows printer / A4: attendance + salary slip on ONE page
+                sb.print_pair(ta, t, *pr); dash_q.put(('sok', t))
+                if ta: dash_q.put(('ok', ta))
+            else: sb.print_slip(t, *pr); dash_q.put(('sok', t))
         except Exception as e: dash_q.put(('serr', str(e)))
     threading.Thread(target=work, daemon=True).start()
 
@@ -1019,14 +1021,35 @@ dl_msg = tk.Label(dl_row, text='', bg='white', fg=MUTED, font=FN, anchor='w', ju
 bd_o, bar_d = make_card(tab_data, 'Manual upload')
 bd_o.pack(fill='x', padx=16, pady=(0, 8))
 tk.Label(bar_d, text='Normally not needed: just copy the WH / LB files into the reports folder. Or pick a file here (.xls, .xlsx or .csv, name must contain WH or LB; salary slips: any PDF).', bg='white', fg=MUTED, font=FN).pack(anchor='w', pady=(0, 10))
-btn_row = tk.Frame(bar_d, bg='white'); btn_row.pack(anchor='w')
+btn_row = tk.Frame(bar_d, bg='white'); btn_row.pack(fill='x')
 for t, c in [('Load WH report', lambda: load_report('WH')), ('Load LB report', lambda: load_report('LB')), ('Load salary PDF', lambda: load_salary_pdf())]:
     load_btns.append(ttk.Button(btn_row, text=t, style='Primary.TButton', command=c)); load_btns[-1].pack(side='left', padx=(0, 8))
+pc_v = tk.StringVar(value=str(cfg.get('preview_clear', '30')))
+
+
+def commit_pc(e=None):                                # adjustable clear time of the previewed slip (no password needed)
+    s = pc_v.get().strip()
+    if s.isdigit(): cfg['preview_clear'] = s; sb.WEB['clear'] = clear_secs()
+    else: pc_v.set(str(cfg.get('preview_clear', '30')))
+    try: json.dump(cfg, open(CFG, 'w'))
+    except OSError: pass
+
+
+pc_f = tk.Frame(btn_row, bg='white'); pc_f.pack(side='right')
+tk.Label(pc_f, text='Clear previewed slip after', bg='white', fg=MUTED, font=FN).pack(side='left', padx=(0, 6))
+pc_e = ttk.Entry(pc_f, textvariable=pc_v, width=5, justify='center'); pc_e.pack(side='left')
+tk.Label(pc_f, text='sec (0 = never)', bg='white', fg=MUTED, font=FN).pack(side='left', padx=(6, 0))
+pc_e.bind('<Return>', commit_pc); pc_e.bind('<FocusOut>', commit_pc)
 
 
 # ---- Machines tab: every attendance machine with its own LCD screen (extra monitor on this PC) and/or its own web LCD page
 def clear_secs():                                      # seconds a slip stays on the screens before it is cleared (0 = never): previewed slips use the Dashboard box, otherwise the web LCD value
     try: return max(0, int(cfg.get('preview_clear' if sb.PREVIEW_ONLY else 'lcd_clear') or 0))
+    except (TypeError, ValueError): return 0
+
+
+def preview_secs():                                    # seconds a slip stays on the Dashboard before it is cleared (Data tab box, 0 = never)
+    try: return max(0, int(cfg.get('preview_clear') or 0))
     except (TypeError, ValueError): return 0
 
 
@@ -1094,7 +1117,9 @@ def add_mrow(m=None):
     for k2 in ('name', 'ip', 'port', 'key', 'pip', 'pname'): row[k2] = tk.StringVar(value=str(m.get(k2, '')))
     row['w'] = [ttk.Checkbutton(mach_b, variable=row['on'], style='Card.TCheckbutton')]
     for c, (k2, wd) in enumerate((('name', 14), ('ip', 16), ('port', 6), ('key', 6), ('pip', 16)), 1): row['w'].append(ttk.Entry(mach_b, textvariable=row[k2], width=wd))
-    row['w'].append(ttk.Combobox(mach_b, textvariable=row['pname'], values=[''] + list(cb['values']), width=26, state='readonly'))
+    pcb = ttk.Combobox(mach_b, textvariable=row['pname'], values=[''] + list(cb['values']), width=26, state='readonly')
+    pcb.bind('<<ComboboxSelected>>', lambda e, r_=row: r_['pname'].get() and plain.set(True))      # Windows printer = normal text, both slips on one A4 page
+    row['w'].append(pcb)
     row['w'].append(ttk.Combobox(mach_b, textvariable=row['screen'], values=SCREENS, width=22, state='readonly'))
     for c, w in enumerate(row['w']): w.grid(row=r, column=c, sticky='w', padx=(0, 8), pady=3)
     mrows.append(row)
@@ -1176,13 +1201,17 @@ class LcdWindow:
         pip, pname = printer_of(self.name)
 
         def work():
-            try: sb.print_slip(t, pip, pname); ok, err = True, ''
+            try:
+                if sb.pair_mode(pip, pname): sb.print_pair(self.cur['att'], self.cur['sal'], pip, pname)
+                else: sb.print_slip(t, pip, pname)
+                ok, err = True, ''
             except Exception as e: ok, err = False, str(e)
             root.after(0, lambda: self.printed(p, ok, err))
         threading.Thread(target=work, daemon=True).start()
 
     def printed(self, p, ok, err):
-        p.btn.config(state='normal'); p.status_lbl.config(fg=INK if ok else RED); p.status.set('Printed' if ok else 'Print failed')
+        for q_ in ((self.att, self.sal) if ok and sb.pair_mode(*printer_of(self.name)) and self.cur['att'] and self.cur['sal'] else (p,)):
+            q_.btn.config(state='normal'); q_.status_lbl.config(fg=INK if ok else RED); q_.status.set('Printed' if ok else 'Print failed')
 
     def handle(self, uid, text, state, err):               # same states as the Dashboard, but only for this machine's punches
         a, s = self.att, self.sal
@@ -1222,7 +1251,7 @@ def sync_lcds():                                       # open / close / move the
 
 
 def poll():
-    if sb.PREVIEW_ONLY and shown_at[0] and clear_secs() and time.time() - shown_at[0] > clear_secs(): clear()      # previewed slip: cleared after the time set on the Dashboard
+    if shown_at[0] and preview_secs() and time.time() - shown_at[0] > preview_secs(): clear()      # previewed slip: cleared after the time set in the Data tab
     while not dash_q.empty():
         kind, info = dash_q.get()
         if kind in ('ok', 'err', 'punch'): att.btn.config(state='normal')
